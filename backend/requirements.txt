@@ -1,0 +1,35 @@
+# ScoreScribe Backend — Python dependencies
+# Install:  pip install -r requirements.txt
+
+# ── Web framework ──────────────────────────────────────────────────────────────
+fastapi==0.135.1
+uvicorn[standard]==0.41.0
+python-multipart==0.0.22       # multipart/form-data file uploads
+
+# ── Config ─────────────────────────────────────────────────────────────────────
+pydantic-settings==2.13.1      # BaseSettings + .env support
+python-dotenv==1.2.2
+
+# ── Task queue ─────────────────────────────────────────────────────────────────
+celery==5.6.2
+redis==7.3.0
+
+# ── Audio / Signal processing ──────────────────────────────────────────────────
+basic-pitch==0.4.0            # Spotify pitch transcription
+demucs==4.0.1                 # Meta source separation
+librosa==0.11.0               # Audio feature extraction + onset detection
+numpy==1.26.4
+scipy==1.17.1
+soundfile==0.13.1             # Audio file I/O
+pretty_midi==0.2.11           # MIDI manipulation
+
+# ── Instrument classification (optional — comment out if no GPU) ───────────────
+tensorflow==2.15.0
+tensorflow-hub==0.16.1
+
+# ── Sheet music notation ───────────────────────────────────────────────────────
+music21==9.9.1
+
+# ── Utilities ──────────────────────────────────────────────────────────────────
+aiofiles==25.1.0
+httpx==0.28.1

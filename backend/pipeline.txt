@@ -1,0 +1,43 @@
+Audio Input
+    │
+    ▼
+┌─────────────────────────────┐
+│  1. PREPROCESSING           │
+│  - Resample to 22050 Hz     │
+│  - Normalize amplitude      │
+│  - Noise reduction          │
+└────────────┬────────────────┘
+             │
+             ▼
+┌─────────────────────────────┐
+│  2. SOURCE SEPARATION       │  ← Demucs / Spleeter
+│  Split into stems:          │
+│  vocals, piano, bass,       │  - can bypass for the time being
+│  drums, other               │
+└────────────┬────────────────┘
+             │
+     ┌───────┴───────┐
+     │  Per-stem     │
+     ▼               ▼
+┌──────────┐   ┌──────────────────┐
+│ TIMBRE   │   │ PITCH/RHYTHM     │
+│ ANALYSIS │   │ TRANSCRIPTION    │
+│ YAMNet / │   │ Basic Pitch /    │
+│ custom   │   │ MT3 / Onsets&    │
+│ CNN      │   │ Frames → MIDI    │
+└────┬─────┘   └────────┬─────────┘
+     │                  │
+     └────────┬──────────┘
+              ▼
+┌─────────────────────────────┐
+│  4. MIDI + INSTRUMENT LABEL │
+│  Merge: note events +       │
+│  instrument assignments     │
+└────────────┬────────────────┘
+             ▼
+┌─────────────────────────────┐
+│  5. SHEET MUSIC RENDERING   │  ← music21 → MusicXML → LilyPond/MuseScore
+│  Quantize rhythm            │
+│  Key/time signature detect  │
+│  Export MusicXML / PDF      │
+└─────────────────────────────┘

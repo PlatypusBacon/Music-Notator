@@ -1,0 +1,27 @@
+Flutter App
+    │  HTTP/WebSocket (REST or gRPC)
+    ▼
+┌─────────────────────────────────────┐
+│         FastAPI Backend             │  ← Python, async
+│                                     │
+│  POST /transcribe  (upload audio)   │
+│  GET  /job/{id}    (poll status)    │
+│  WS   /stream      (live audio)     │
+│                                     │
+│  ┌─────────────────────────────┐    │
+│  │     Task Queue (Celery)     │    │  ← async heavy processing
+│  │     + Redis broker          │    │
+│  └─────────────────────────────┘    │
+│                                     │
+│  ┌─────────────────────────────┐    │
+│  │   ML Processing Workers     │    │
+│  │   (Demucs → Basic Pitch     │    │
+│  │    → YAMNet → music21)      │    │
+│  └─────────────────────────────┘    │
+└──────────────┬──────────────────────┘
+               │
+       ┌───────┴────────┐
+       ▼                ▼
+  PostgreSQL         S3 / MinIO
+  (job metadata)   (audio + output
+                    MusicXML/PDF)

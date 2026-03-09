@@ -1,0 +1,9 @@
+.venv
+.venv2/
+frontend/android/
+frontend/ios/
+frontend/build/
+frontend/windows
+frontend/macos/
+frontend/web/
+frontend/linux
