@@ -1,51 +1,37 @@
 """
 workers/tasks.py
 ────────────────
-Main Celery task: orchestrates the four-stage transcription pipeline.
-
-Stages
-──────
-1. separation    → Demucs splits audio into stems (or skips if single-instrument)
-2. transcription → Basic Pitch runs on each pitched stem; onset detection on drums
-3. instrument_id → stem-label priors + optional YAMNet classification
-4. notation      → music21 merges MIDIs → MusicXML + PDF + combined MIDI
-
-Progress updates
-────────────────
-The task calls self.update_state(state="PROGRESS", meta={...}) after each
-significant step. FastAPI's GET /jobs/{id} reads result.info to return live
-progress to the Flutter app's polling loop.
-
-Note: the function parameter is named `do_separate` internally to avoid
-shadowing the imported `separate_stems` function from demucs_separator.
+Celery task: orchestrates the four-stage transcription pipeline.
+Every stage emits DEBUG logs with timing so you can see exactly
+where time is being spent in the Celery worker log.
 """
 
 from __future__ import annotations
 
+import logging
+import time
 import traceback
 from pathlib import Path
 from typing import Any
 
 from workers.celery_app import celery_app
-from pipeline.separation.demucs_separator import separate_stems
-from pipeline.transcription.basic_pitch_runner import transcribe_stem
-from pipeline.transcription.instrument_classifier import classify_instrument
-from pipeline.notation.score_builder import build_score
+from seperation.demucs_seperator import separate_stems
+from seperation.pitch_extraction import transcribe_stem
+from transcription.instrument_classifier import classify_instrument
+from notation.score_builder import build_score
 from config import settings
+from bedug import setup_logging
+
+setup_logging(level="DEBUG", log_file=Path(__file__).parent.parent / "celery_pipeline.log")
+log = logging.getLogger("scorescribe.task")
 
 
 # ── Progress helper ────────────────────────────────────────────────────────────
 
-def _push(
-    task,
-    state: str,
-    progress: float,
-    stages: list[dict],
-    stems: list[dict] | None = None,
-    result: dict | None = None,
-    error: str | None = None,
-) -> None:
-    """Publish a PROGRESS update so the API can relay live status to Flutter."""
+def _push(task, state: str, progress: float, stages: list[dict],
+          stems: list[dict] | None = None,
+          result: dict | None = None,
+          error: str | None = None) -> None:
     meta: dict[str, Any] = {
         "state":    state,
         "progress": round(progress, 3),
@@ -63,16 +49,15 @@ def _push(
 @celery_app.task(
     bind=True,
     name="run_transcription_pipeline",
-    max_retries=0,          # don't auto-retry expensive ML jobs
-    soft_time_limit=600,    # 10 min soft limit → SoftTimeLimitExceeded
-    time_limit=660,         # 11 min hard kill
+    max_retries=0,
+    soft_time_limit=600,
+    time_limit=660,
 )
 def run_transcription_pipeline(
     self,
     job_id: str,
     audio_path: str,
-    do_separate: bool = True,          # NOTE: NOT named 'separate_stems' — avoids
-                                        # shadowing the imported function above
+    do_separate: bool = True,
     instruments: list[str] | None = None,
     output_format: str = "musicxml",
     quantize: bool = True,
@@ -80,17 +65,22 @@ def run_transcription_pipeline(
     frame_threshold: float = 0.3,
     min_note_length_ms: int = 58,
 ) -> dict:
-    """
-    Full transcription pipeline as a Celery task.
-
-    Parameters match the kwargs passed by main.py's transcribe_async endpoint.
-    Returns the completed result dict (also stored in Celery's Redis backend).
-    """
     instruments = instruments or []
     job_dir = settings.output_dir / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Stage scaffolding ─────────────────────────────────────────────────────
+    task_start = time.perf_counter()
+    log.info("═" * 55)
+    log.info("JOB %s  pipeline starting", job_id)
+    log.info("  audio       : %s", audio_path)
+    log.info("  do_separate : %s", do_separate)
+    log.info("  quantize    : %s", quantize)
+    log.info("  onset_thr   : %s", onset_threshold)
+    log.info("  frame_thr   : %s", frame_threshold)
+    log.info("  min_note_ms : %s", min_note_length_ms)
+    log.info("  output_dir  : %s", job_dir)
+    log.info("═" * 55)
+
     stages: list[dict[str, Any]] = [
         {"id": "separation",    "label": "Source Separation (Demucs)",       "state": "pending", "progress": 0.0},
         {"id": "transcription", "label": "Pitch Transcription (Basic Pitch)", "state": "pending", "progress": 0.0},
@@ -108,23 +98,26 @@ def run_transcription_pipeline(
         # ══════════════════════════════════════════════════════════════════════
         # STAGE 1 — Source Separation
         # ══════════════════════════════════════════════════════════════════════
+        t1 = time.perf_counter()
         set_stage(0, "running")
         _push(self, "processing", 0.05, stages)
+        log.info("JOB %s  ── STAGE 1: source separation  do_separate=%s", job_id, do_separate)
 
         if do_separate:
+            log.debug("JOB %s  running Demucs model=%s", job_id, settings.demucs_model)
             stem_paths = separate_stems(
                 audio_path=audio_path,
                 output_dir=str(job_dir),
                 model=settings.demucs_model,
             )
+            log.info("JOB %s  ── separation done  stems=%s  %.1fs",
+                     job_id, [s["id"] for s in stem_paths], time.perf_counter() - t1)
         else:
-            # Single-instrument or already-separated file: treat as one stem.
             stem_paths = [{"id": "other_0", "label": "Full Mix", "path": audio_path}]
+            log.info("JOB %s  ── separation skipped (single stem)", job_id)
 
         set_stage(0, "complete", 1.0)
 
-        # Build the stem info list that Flutter shows as playable cards.
-        # audio_url points to FastAPI's /outputs static mount.
         stem_infos = [
             {
                 "id":        s["id"],
@@ -133,18 +126,25 @@ def run_transcription_pipeline(
             }
             for s in stem_paths
         ]
+        log.debug("JOB %s  stem_infos=%s", job_id, [s["id"] for s in stem_infos])
         _push(self, "processing", 0.30, stages, stems=stem_infos)
 
         # ══════════════════════════════════════════════════════════════════════
-        # STAGE 2 — Pitch Transcription (Basic Pitch, per stem)
+        # STAGE 2 — Pitch Transcription
         # ══════════════════════════════════════════════════════════════════════
+        t2 = time.perf_counter()
         set_stage(1, "running")
         _push(self, "processing", 0.35, stages, stems=stem_infos)
+        log.info("JOB %s  ── STAGE 2: pitch transcription  stems=%d", job_id, len(stem_paths))
 
         midi_results: list[dict] = []
         n_stems = len(stem_paths)
 
         for i, stem in enumerate(stem_paths):
+            st = time.perf_counter()
+            log.debug("JOB %s  transcribing stem %d/%d: %s  path=%s",
+                      job_id, i + 1, n_stems, stem["id"], stem["path"])
+
             midi_path, note_events = transcribe_stem(
                 audio_path=stem["path"],
                 output_dir=str(job_dir),
@@ -154,6 +154,10 @@ def run_transcription_pipeline(
                 frame_threshold=frame_threshold,
                 min_note_length_ms=min_note_length_ms,
             )
+            elapsed_stem = time.perf_counter() - st
+            log.info("JOB %s  ── stem '%s' → %d notes  midi=%s  %.1fs",
+                     job_id, stem["id"], len(note_events), midi_path, elapsed_stem)
+
             midi_results.append({
                 "stem_id":     stem["id"],
                 "label":       stem["label"],
@@ -163,37 +167,50 @@ def run_transcription_pipeline(
 
             stem_progress = (i + 1) / n_stems
             set_stage(1, "running", stem_progress)
-            _push(self, "processing", 0.35 + 0.25 * stem_progress,
-                  stages, stems=stem_infos)
+            _push(self, "processing", 0.35 + 0.25 * stem_progress, stages, stems=stem_infos)
 
         set_stage(1, "complete", 1.0)
+        log.info("JOB %s  ── transcription done  total_notes=%d  %.1fs",
+                 job_id, sum(len(m["note_events"]) for m in midi_results),
+                 time.perf_counter() - t2)
 
         # ══════════════════════════════════════════════════════════════════════
         # STAGE 3 — Instrument Detection
         # ══════════════════════════════════════════════════════════════════════
+        t3 = time.perf_counter()
         set_stage(2, "running")
         _push(self, "processing", 0.62, stages, stems=stem_infos)
+        log.info("JOB %s  ── STAGE 3: instrument detection", job_id)
 
         detected_instruments: list[dict] = []
         for stem in stem_paths:
+            log.debug("JOB %s  classifying stem '%s'  hint='%s'",
+                      job_id, stem["id"], stem["label"])
             inst = classify_instrument(
                 audio_path=stem["path"],
-                hint_label=stem["label"],  # Demucs label provides a strong prior
+                hint_label=stem["label"],
             )
+            log.info("JOB %s  ── '%s' → %s  confidence=%.2f",
+                     job_id, stem["id"], inst.get("name"), inst.get("confidence"))
             detected_instruments.append({
                 "stem_id":    stem["id"],
                 "stem_label": stem["label"],
-                **inst,        # keys: name, confidence, emoji
+                **inst,
             })
 
         set_stage(2, "complete", 1.0)
         _push(self, "processing", 0.70, stages, stems=stem_infos)
+        log.info("JOB %s  ── instrument detection done  %.1fs",
+                 job_id, time.perf_counter() - t3)
 
         # ══════════════════════════════════════════════════════════════════════
-        # STAGE 4 — Score Generation (music21 → MusicXML + PDF + MIDI)
+        # STAGE 4 — Score Generation
         # ══════════════════════════════════════════════════════════════════════
+        t4 = time.perf_counter()
         set_stage(3, "running")
         _push(self, "processing", 0.75, stages, stems=stem_infos)
+        log.info("JOB %s  ── STAGE 4: score generation  format=%s  quantize=%s",
+                 job_id, output_format, quantize)
 
         score_paths = build_score(
             midi_results=midi_results,
@@ -202,15 +219,15 @@ def run_transcription_pipeline(
             output_format=output_format,
             quantize=quantize,
         )
+        log.info("JOB %s  ── score written  files=%s  %.1fs",
+                 job_id, score_paths, time.perf_counter() - t4)
 
         set_stage(3, "complete", 1.0)
 
-        # ── Assemble final result ──────────────────────────────────────────────
+        # ── Final result ───────────────────────────────────────────────────────
         inst_list = []
         for inst in detected_instruments:
-            midi_r = next(
-                (m for m in midi_results if m["stem_id"] == inst["stem_id"]), {}
-            )
+            midi_r = next((m for m in midi_results if m["stem_id"] == inst["stem_id"]), {})
             inst_list.append({
                 "name":        inst.get("name", inst["stem_label"]),
                 "stem_label":  inst["stem_label"],
@@ -224,25 +241,28 @@ def run_transcription_pipeline(
             "pdf_url":              settings.output_url(job_id, score_paths["pdf"]),
             "midi_url":             settings.output_url(job_id, score_paths["midi"]),
             "detected_instruments": inst_list,
-            # Include stage snapshot and stems in SUCCESS result so
-            # GET /jobs/{id} can reconstruct the full response.
             "stages":               stages,
             "stems":                stem_infos,
         }
+
+        total = time.perf_counter() - task_start
+        log.info("JOB %s  ══ PIPELINE COMPLETE  total=%.1fs ══", job_id, total)
+        log.info("  musicxml : %s", result["musicxml_url"])
+        log.info("  midi     : %s", result["midi_url"])
+        log.info("  pdf      : %s", result["pdf_url"])
 
         _push(self, "complete", 1.0, stages, stems=stem_infos, result=result)
         return result
 
     except Exception as exc:
-        traceback.print_exc()
+        elapsed = time.perf_counter() - task_start
         error_msg = f"{type(exc).__name__}: {exc}"
+        log.error("JOB %s  ══ PIPELINE FAILED  %.1fs  error=%s", job_id, elapsed, error_msg)
+        log.debug("JOB %s  traceback:\n%s", job_id, traceback.format_exc())
 
-        # Mark whichever stage was running as failed
         for s in stages:
             if s["state"] == "running":
                 s["state"] = "failed"
 
         _push(self, "failed", 0.0, stages, stems=stem_infos or None, error=error_msg)
-
-        # Re-raise so Celery marks the task FAILURE and stores the exception
         raise
