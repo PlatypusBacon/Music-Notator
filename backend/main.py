@@ -48,7 +48,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="ScoreScribe", version="0.1.0", docs_url="/docs")
+app = FastAPI(title="Score!", version="0.1.0", docs_url="/docs")
 
 app.add_middleware(
     CORSMiddleware,
